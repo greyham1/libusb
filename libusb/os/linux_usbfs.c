@@ -471,6 +471,7 @@ static int op_init(struct libusb_context *ctx)
 	if (sysfs_has_descriptors)
 		usbi_dbg("sysfs has complete descriptors");
 
+#if !defined(__ANDROID__)
 	usbi_mutex_static_lock(&linux_hotplug_startstop_lock);
 	r = LIBUSB_SUCCESS;
 	if (init_count == 0) {
@@ -486,7 +487,7 @@ static int op_init(struct libusb_context *ctx)
 	} else
 		usbi_err(ctx, "error starting hotplug event monitor");
 	usbi_mutex_static_unlock(&linux_hotplug_startstop_lock);
-
+#endif
 	return r;
 }
 
@@ -503,22 +504,27 @@ static void op_exit(void)
 
 static int linux_start_event_monitor(void)
 {
-#if defined(USE_UDEV)
-	return linux_udev_start_event_monitor();
-#elif !defined(__ANDROID__)
-	return linux_netlink_start_event_monitor();
-#else 
+#if !defined(__ANDROID__)
+	#if defined(USE_UDEV)
+		return linux_udev_start_event_monitor();
+	#else 
+		return linux_netlink_start_event_monitor();
+	#endif
+#else
 	return LIBUSB_SUCCESS;
 #endif
+
 }
 
 static int linux_stop_event_monitor(void)
 {
+#if !defined(__ANDROID__)
 #if defined(USE_UDEV)
 	return linux_udev_stop_event_monitor();
-#elif !defined(__ANDROID__)
+#else
 	return linux_netlink_stop_event_monitor();
-#else 
+#endif
+#else
 	return LIBUSB_SUCCESS;
 #endif
 }
@@ -529,12 +535,13 @@ static int linux_scan_devices(struct libusb_context *ctx)
 
 	usbi_mutex_static_lock(&linux_hotplug_lock);
 
+#if !defined(__ANDROID__)
 #if defined(USE_UDEV)
 	ret = linux_udev_scan_devices(ctx);
-#elif !defined(__ANDROID__)
+#else
 	ret = linux_default_scan_devices(ctx);
 #endif
-
+#endif
 	usbi_mutex_static_unlock(&linux_hotplug_lock);
 
 	return ret;
@@ -1139,6 +1146,8 @@ int linux_enumerate_device(struct libusb_context *ctx,
 		discdevs = discovered_devs_append(*selinux_discdevs, dev);
 		if (discdevs) {
 			*selinux_discdevs = discdevs;
+		} else {
+			r = LIBUSB_ERROR_NO_MEM;
 		}
 	}
 #endif
@@ -2741,9 +2750,14 @@ static int op_handle_events(struct libusb_context *ctx,
 			/* device will still be marked as attached if hotplug monitor thread
 			 * hasn't processed remove event yet */
 			usbi_mutex_static_lock(&linux_hotplug_lock);
+
+#if defined(__ANDROID__)
 			if (handle->dev->attached)
 				linux_device_disconnected(handle->dev->bus_number,
 						handle->dev->device_address);
+#endif
+
+
 			usbi_mutex_static_unlock(&linux_hotplug_lock);
 
 			if (hpriv->caps & USBFS_CAP_REAP_AFTER_DISCONNECT) {
