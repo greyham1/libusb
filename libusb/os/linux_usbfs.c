@@ -42,13 +42,6 @@
 #include "libusbi.h"
 #include "linux_usbfs.h"
 
-
-#if defined(__ANDROID__)
-#define ANDROID_CODE(...) __VA_ARGS__
-#else
-#define ANDROID_CODE(...)
-#endif
-
 /* sysfs vs usbfs:
  * opening a usbfs node causes the device to be resumed, so we attempt to
  * avoid this during enumeration.
@@ -142,6 +135,10 @@ static int linux_stop_event_monitor(void);
 static int linux_scan_devices(struct libusb_context *ctx);
 static int sysfs_scan_device(struct libusb_context *ctx, const char *devname);
 static int detach_kernel_driver_and_claim(struct libusb_device_handle *, int);
+
+#if defined(__ANDROID__)
+static struct discovered_devs **selinux_discdevs;
+#endif
 
 #if !defined(USE_UDEV)
 static int linux_default_scan_devices (struct libusb_context *ctx);
@@ -1101,6 +1098,9 @@ int linux_enumerate_device(struct libusb_context *ctx,
 	unsigned long session_id;
 	struct libusb_device *dev;
 	int r = 0;
+#if defined(__ANDROID__)
+	struct discovered_devs *discdevs;
+#endif
 
 	/* FIXME: session ID is not guaranteed unique as addresses can wrap and
 	 * will be reused. instead we should add a simple sysfs attribute with
@@ -1133,6 +1133,16 @@ int linux_enumerate_device(struct libusb_context *ctx,
 	r = linux_get_parent_info(dev, sysfs_dir);
 	if (r < 0)
 		goto out;
+
+#if defined(__ANDROID__)
+	if (selinux_discdevs) {
+		discdevs = discovered_devs_append(*selinux_discdevs, dev);
+		if (discdevs) {
+			*selinux_discdevs = discdevs;
+		}
+	}
+#endif
+
 out:
 	if (r < 0)
 		libusb_unref_device(dev);
@@ -1215,7 +1225,7 @@ static int usbfs_scan_busdir(struct libusb_context *ctx, uint8_t busnum)
 	return r;
 }
 
-static int usbfs_get_device_list(struct libusb_context *ctx ANDROID_CODE(,struct discovered_devs** discdevs))
+static int usbfs_get_device_list(struct libusb_context *ctx)
 {
 	struct dirent *entry;
 	DIR *buses = opendir(usbfs_path);
@@ -1237,7 +1247,7 @@ static int usbfs_get_device_list(struct libusb_context *ctx ANDROID_CODE(,struct
 			if (!_is_usbdev_entry(entry, &busnum, &devaddr))
 				continue;
 
-			r = linux_enumerate_device(ctx, busnum, (uint8_t) devaddr, NULL  ANDROID_CODE(,discdevs));
+			r = linux_enumerate_device(ctx, busnum, (uint8_t) devaddr, NULL);
 			if (r < 0) {
 				usbi_dbg("failed to enumerate dir entry %s", entry->d_name);
 				continue;
@@ -1276,7 +1286,7 @@ static int sysfs_scan_device(struct libusb_context *ctx, const char *devname)
 }
 
 #if !defined(USE_UDEV)
-static int sysfs_get_device_list(struct libusb_context *ctx ANDROID_CODE(,struct discovered_devs **_discdevs))
+static int sysfs_get_device_list(struct libusb_context *ctx)
 {
 	DIR *devices = opendir(SYSFS_DEVICE_PATH);
 	struct dirent *entry;
@@ -1323,12 +1333,64 @@ static int linux_default_scan_devices (struct libusb_context *ctx)
 }
 #endif
 
+#if defined(__ANDROID__)
+static void _get_usbfs_path(struct libusb_device *dev, char *path) {
+	if (usbdev_names)
+		snprintf(path, PATH_MAX, "%s/usbdev%d.%d",
+			usbfs_path, dev->bus_number, dev->device_address);
+	else
+		snprintf(path, PATH_MAX, "%s/%03d/%03d",
+			usbfs_path, dev->bus_number, dev->device_address);
+}
+
+static int find_fd_by_name(char *file_name) {
+	struct dirent *fd_dirent;
+	DIR *proc_fd = opendir("/proc/self/fd");
+	int ret = -1;
+
+	while ((fd_dirent = readdir(proc_fd))) {
+		char link_file_name[1024];
+		char fd_file_name[1024];
+
+		if (fd_dirent->d_type != DT_LNK) {
+			continue;
+		}
+
+		snprintf(link_file_name, 1024, "/proc/self/fd/%s", fd_dirent->d_name);
+
+		memset(fd_file_name, 0, sizeof(fd_file_name));
+		readlink(link_file_name, fd_file_name, sizeof(fd_file_name) - 1);
+
+		if (!strcmp(fd_file_name, file_name)) {
+			ret = atoi(fd_dirent->d_name);
+		}
+	}
+
+	closedir(proc_fd);
+
+	return ret;
+}
+#endif
+
 static int op_open(struct libusb_device_handle *handle)
 {
 	struct linux_device_handle_priv *hpriv = _device_handle_priv(handle);
 	int r;
 
+#if defined(__ANDROID__)
+	char filename[PATH_MAX];
+	_get_usbfs_path(handle->dev, filename);
+
+	hpriv->fd = find_fd_by_name(filename);
+	// Fallback to standard procedure
+	if (hpriv->fd == -1) {
+		hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
+	}
+#else
 	hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
+#endif
+
+
 	if (hpriv->fd < 0) {
 		if (hpriv->fd == LIBUSB_ERROR_NO_DEVICE) {
 			/* device will still be marked as attached if hotplug monitor thread
@@ -1370,7 +1432,10 @@ static void op_close(struct libusb_device_handle *dev_handle)
 	/* fd may have already been removed by POLLERR condition in op_handle_events() */
 	if (!hpriv->fd_removed)
 		usbi_remove_pollfd(HANDLE_CTX(dev_handle), hpriv->fd);
+	//FD is opened by application intent! We did not open it => we should not close it.
+#if defined(__ANDROID__)
 	close(hpriv->fd);
+#endif
 }
 
 static int op_get_configuration(struct libusb_device_handle *handle,
@@ -2727,13 +2792,16 @@ static clockid_t op_get_timerfd_clockid(void)
 #endif
 
 #if defined(__ANDROID__)
-static int op_get_device_list(struct libusb_context *ctx,
-	struct discovered_devs **_discdevs) {
-
-	if (sysfs_can_relate_devices != 0)
-		return sysfs_get_device_list2(ctx, _discdevs);
-	else
-		return usbfs_get_device_list2(ctx, _discdevs);
+static int op_get_device_list(struct libusb_context *ctx, struct discovered_devs **discdevs) {
+	int r = 0;
+	selinux_discdevs = discdevs;
+	if (sysfs_can_relate_devices != 0) {
+		r = sysfs_get_device_list(ctx);
+	} else {
+		r = usbfs_get_device_list(ctx);
+	}
+	selinux_discdevs = 0;
+	return r;
 }
 #endif
 
@@ -2742,13 +2810,15 @@ const struct usbi_os_backend linux_usbfs_backend = {
 	.caps = USBI_CAP_HAS_HID_ACCESS|USBI_CAP_SUPPORTS_DETACH_KERNEL_DRIVER,
 	.init = op_init,
 	.exit = op_exit,
+
 #if defined(__ANDROID__)
+	.get_device_list = op_get_device_list,//NULL,//Nettle patch
+	.hotplug_poll = NULL,//Nettle patch
+#else
 	.get_device_list = NULL,
 	.hotplug_poll = op_hotplug_poll,
-#else
-	.get_device_list = op_get_device_list,
-	.hotplug_poll = NULL,//Nettle patch
 #endif
+
 	.get_device_descriptor = op_get_device_descriptor,
 	.get_active_config_descriptor = op_get_active_config_descriptor,
 	.get_config_descriptor = op_get_config_descriptor,
