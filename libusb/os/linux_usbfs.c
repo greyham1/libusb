@@ -42,6 +42,13 @@
 #include "libusbi.h"
 #include "linux_usbfs.h"
 
+
+#if defined(__ANDROID__)
+#define ANDROID_CODE(...) __VA_ARGS__
+#else
+#define ANDROID_CODE(...)
+#endif
+
 /* sysfs vs usbfs:
  * opening a usbfs node causes the device to be resumed, so we attempt to
  * avoid this during enumeration.
@@ -326,7 +333,7 @@ static const char *find_usbfs_path(void)
 /* On udev based systems without any usb-devices /dev/bus/usb will not
  * exist. So if we've not found anything and we're using udev for hotplug
  * simply assume /dev/bus/usb rather then making libusb_init fail. */
-#if defined(USE_UDEV)
+#if defined(USE_UDEV) || defined(__ANDROID__) //SELinux support patch
 	if (ret == NULL)
 		ret = "/dev/bus/usb";
 #endif
@@ -501,8 +508,10 @@ static int linux_start_event_monitor(void)
 {
 #if defined(USE_UDEV)
 	return linux_udev_start_event_monitor();
-#else
+#elif !defined(__ANDROID__)
 	return linux_netlink_start_event_monitor();
+#else 
+	return LIBUSB_SUCCESS;
 #endif
 }
 
@@ -510,20 +519,22 @@ static int linux_stop_event_monitor(void)
 {
 #if defined(USE_UDEV)
 	return linux_udev_stop_event_monitor();
-#else
+#elif !defined(__ANDROID__)
 	return linux_netlink_stop_event_monitor();
+#else 
+	return LIBUSB_SUCCESS;
 #endif
 }
 
 static int linux_scan_devices(struct libusb_context *ctx)
 {
-	int ret;
+	int ret = 0;
 
 	usbi_mutex_static_lock(&linux_hotplug_lock);
 
 #if defined(USE_UDEV)
 	ret = linux_udev_scan_devices(ctx);
-#else
+#elif !defined(__ANDROID__)
 	ret = linux_default_scan_devices(ctx);
 #endif
 
@@ -536,7 +547,7 @@ static void op_hotplug_poll(void)
 {
 #if defined(USE_UDEV)
 	linux_udev_hotplug_poll();
-#else
+#elif !defined(__ANDROID__)
 	linux_netlink_hotplug_poll();
 #endif
 }
@@ -1204,7 +1215,7 @@ static int usbfs_scan_busdir(struct libusb_context *ctx, uint8_t busnum)
 	return r;
 }
 
-static int usbfs_get_device_list(struct libusb_context *ctx)
+static int usbfs_get_device_list(struct libusb_context *ctx ANDROID_CODE(,struct discovered_devs** discdevs))
 {
 	struct dirent *entry;
 	DIR *buses = opendir(usbfs_path);
@@ -1226,7 +1237,7 @@ static int usbfs_get_device_list(struct libusb_context *ctx)
 			if (!_is_usbdev_entry(entry, &busnum, &devaddr))
 				continue;
 
-			r = linux_enumerate_device(ctx, busnum, (uint8_t) devaddr, NULL);
+			r = linux_enumerate_device(ctx, busnum, (uint8_t) devaddr, NULL  ANDROID_CODE(,discdevs));
 			if (r < 0) {
 				usbi_dbg("failed to enumerate dir entry %s", entry->d_name);
 				continue;
@@ -1265,7 +1276,7 @@ static int sysfs_scan_device(struct libusb_context *ctx, const char *devname)
 }
 
 #if !defined(USE_UDEV)
-static int sysfs_get_device_list(struct libusb_context *ctx)
+static int sysfs_get_device_list(struct libusb_context *ctx ANDROID_CODE(,struct discovered_devs **_discdevs))
 {
 	DIR *devices = opendir(SYSFS_DEVICE_PATH);
 	struct dirent *entry;
@@ -2715,13 +2726,29 @@ static clockid_t op_get_timerfd_clockid(void)
 }
 #endif
 
+#if defined(__ANDROID__)
+static int op_get_device_list(struct libusb_context *ctx,
+	struct discovered_devs **_discdevs) {
+
+	if (sysfs_can_relate_devices != 0)
+		return sysfs_get_device_list2(ctx, _discdevs);
+	else
+		return usbfs_get_device_list2(ctx, _discdevs);
+}
+#endif
+
 const struct usbi_os_backend linux_usbfs_backend = {
 	.name = "Linux usbfs",
 	.caps = USBI_CAP_HAS_HID_ACCESS|USBI_CAP_SUPPORTS_DETACH_KERNEL_DRIVER,
 	.init = op_init,
 	.exit = op_exit,
+#if defined(__ANDROID__)
 	.get_device_list = NULL,
 	.hotplug_poll = op_hotplug_poll,
+#else
+	.get_device_list = op_get_device_list,
+	.hotplug_poll = NULL,//Nettle patch
+#endif
 	.get_device_descriptor = op_get_device_descriptor,
 	.get_active_config_descriptor = op_get_active_config_descriptor,
 	.get_config_descriptor = op_get_config_descriptor,
