@@ -137,7 +137,7 @@ static int sysfs_scan_device(struct libusb_context *ctx, const char *devname);
 static int detach_kernel_driver_and_claim(struct libusb_device_handle *, int);
 
 #if defined(__ANDROID__)
-static struct discovered_devs **selinux_discdevs;
+static struct discovered_devs **selinux_discdevs = 0;
 #endif
 
 #if !defined(USE_UDEV)
@@ -330,7 +330,7 @@ static const char *find_usbfs_path(void)
 /* On udev based systems without any usb-devices /dev/bus/usb will not
  * exist. So if we've not found anything and we're using udev for hotplug
  * simply assume /dev/bus/usb rather then making libusb_init fail. */
-#if defined(USE_UDEV) || defined(__ANDROID__) //SELinux support patch
+#if defined(USE_UDEV) || defined(__ANDROID__)
 	if (ret == NULL)
 		ret = "/dev/bus/usb";
 #endif
@@ -471,7 +471,6 @@ static int op_init(struct libusb_context *ctx)
 	if (sysfs_has_descriptors)
 		usbi_dbg("sysfs has complete descriptors");
 
-#if !defined(__ANDROID__)
 	usbi_mutex_static_lock(&linux_hotplug_startstop_lock);
 	r = LIBUSB_SUCCESS;
 	if (init_count == 0) {
@@ -487,7 +486,7 @@ static int op_init(struct libusb_context *ctx)
 	} else
 		usbi_err(ctx, "error starting hotplug event monitor");
 	usbi_mutex_static_unlock(&linux_hotplug_startstop_lock);
-#endif
+
 	return r;
 }
 
@@ -505,43 +504,41 @@ static void op_exit(void)
 static int linux_start_event_monitor(void)
 {
 #if !defined(__ANDROID__)
-	#if defined(USE_UDEV)
-		return linux_udev_start_event_monitor();
-	#else 
-		return linux_netlink_start_event_monitor();
-	#endif
+    #if defined(USE_UDEV)
+            return linux_udev_start_event_monitor();
+    #else
+            return linux_netlink_start_event_monitor();
+    #endif
 #else
-	return LIBUSB_SUCCESS;
+        return LIBUSB_SUCCESS;
 #endif
-
 }
 
 static int linux_stop_event_monitor(void)
 {
 #if !defined(__ANDROID__)
-#if defined(USE_UDEV)
-	return linux_udev_stop_event_monitor();
+    #if defined(USE_UDEV)
+        return linux_udev_stop_event_monitor();
+    #else
+        return linux_netlink_stop_event_monitor();
+    #endif
 #else
-	return linux_netlink_stop_event_monitor();
-#endif
-#else
-	return LIBUSB_SUCCESS;
+        return LIBUSB_SUCCESS;
 #endif
 }
 
 static int linux_scan_devices(struct libusb_context *ctx)
 {
-	int ret = 0;
+	int ret;
 
 	usbi_mutex_static_lock(&linux_hotplug_lock);
 
-#if !defined(__ANDROID__)
 #if defined(USE_UDEV)
 	ret = linux_udev_scan_devices(ctx);
 #else
 	ret = linux_default_scan_devices(ctx);
 #endif
-#endif
+
 	usbi_mutex_static_unlock(&linux_hotplug_lock);
 
 	return ret;
@@ -551,7 +548,7 @@ static void op_hotplug_poll(void)
 {
 #if defined(USE_UDEV)
 	linux_udev_hotplug_poll();
-#elif !defined(__ANDROID__)
+#else
 	linux_netlink_hotplug_poll();
 #endif
 }
@@ -1106,7 +1103,7 @@ int linux_enumerate_device(struct libusb_context *ctx,
 	struct libusb_device *dev;
 	int r = 0;
 #if defined(__ANDROID__)
-	struct discovered_devs *discdevs;
+        struct discovered_devs *discdevs;
 #endif
 
 	/* FIXME: session ID is not guaranteed unique as addresses can wrap and
@@ -1142,22 +1139,29 @@ int linux_enumerate_device(struct libusb_context *ctx,
 		goto out;
 
 #if defined(__ANDROID__)
-	if (selinux_discdevs) {
-		discdevs = discovered_devs_append(*selinux_discdevs, dev);
-		if (discdevs) {
-			*selinux_discdevs = discdevs;
-		} else {
-			r = LIBUSB_ERROR_NO_MEM;
-		}
-	}
+        if (selinux_discdevs) {
+                discdevs = discovered_devs_append(*selinux_discdevs, dev);
+                if (discdevs) {
+                        *selinux_discdevs = discdevs;
+                } else {
+                        r = LIBUSB_ERROR_NO_MEM;
+                }
+        }else{
+                r = LIBUSB_ERROR_NO_MEM;
+        }
 #endif
 
 out:
-	if (r < 0)
-		libusb_unref_device(dev);
-	else
-		usbi_connect_device(dev);
-
+#if !defined(__ANDROID__)
+        if (r < 0){
+                libusb_unref_device(dev);
+        }else{
+                usbi_connect_device(dev);
+        }
+#else
+        //Always unref because device got ref in discovered_devs_append! otherwise error occured -> destroy it
+        libusb_unref_device(dev);
+#endif
 	return r;
 }
 
@@ -1344,40 +1348,40 @@ static int linux_default_scan_devices (struct libusb_context *ctx)
 
 #if defined(__ANDROID__)
 static void _get_usbfs_path(struct libusb_device *dev, char *path) {
-	if (usbdev_names)
-		snprintf(path, PATH_MAX, "%s/usbdev%d.%d",
-			usbfs_path, dev->bus_number, dev->device_address);
-	else
-		snprintf(path, PATH_MAX, "%s/%03d/%03d",
-			usbfs_path, dev->bus_number, dev->device_address);
+        if (usbdev_names)
+                snprintf(path, PATH_MAX, "%s/usbdev%d.%d",
+                        usbfs_path, dev->bus_number, dev->device_address);
+        else
+                snprintf(path, PATH_MAX, "%s/%03d/%03d",
+                        usbfs_path, dev->bus_number, dev->device_address);
 }
 
 static int find_fd_by_name(char *file_name) {
-	struct dirent *fd_dirent;
-	DIR *proc_fd = opendir("/proc/self/fd");
-	int ret = -1;
+        struct dirent *fd_dirent;
+        DIR *proc_fd = opendir("/proc/self/fd");
+        int ret = -1;
 
-	while ((fd_dirent = readdir(proc_fd))) {
-		char link_file_name[1024];
-		char fd_file_name[1024];
+        while ((fd_dirent = readdir(proc_fd))) {
+                char link_file_name[1024];
+                char fd_file_name[1024];
 
-		if (fd_dirent->d_type != DT_LNK) {
-			continue;
-		}
+                if (fd_dirent->d_type != DT_LNK) {
+                        continue;
+                }
 
-		snprintf(link_file_name, 1024, "/proc/self/fd/%s", fd_dirent->d_name);
+                snprintf(link_file_name, 1024, "/proc/self/fd/%s", fd_dirent->d_name);
 
-		memset(fd_file_name, 0, sizeof(fd_file_name));
-		readlink(link_file_name, fd_file_name, sizeof(fd_file_name) - 1);
+                memset(fd_file_name, 0, sizeof(fd_file_name));
+                readlink(link_file_name, fd_file_name, sizeof(fd_file_name) - 1);
 
-		if (!strcmp(fd_file_name, file_name)) {
-			ret = atoi(fd_dirent->d_name);
-		}
-	}
+                if (!strcmp(fd_file_name, file_name)) {
+                        ret = atoi(fd_dirent->d_name);
+                }
+        }
 
-	closedir(proc_fd);
+        closedir(proc_fd);
 
-	return ret;
+        return ret;
 }
 #endif
 
@@ -1387,18 +1391,17 @@ static int op_open(struct libusb_device_handle *handle)
 	int r;
 
 #if defined(__ANDROID__)
-	char filename[PATH_MAX];
-	_get_usbfs_path(handle->dev, filename);
+        char filename[PATH_MAX];
+        _get_usbfs_path(handle->dev, filename);
 
-	hpriv->fd = find_fd_by_name(filename);
-	// Fallback to standard procedure
-	if (hpriv->fd == -1) {
-		hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
-	}
+        hpriv->fd = find_fd_by_name(filename);
+        // Fallback to standard procedure
+        if (hpriv->fd == -1) {
+                hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
+        }
 #else
-	hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
+        hpriv->fd = _get_usbfs_fd(handle->dev, O_RDWR, 0);
 #endif
-
 
 	if (hpriv->fd < 0) {
 		if (hpriv->fd == LIBUSB_ERROR_NO_DEVICE) {
@@ -1441,8 +1444,9 @@ static void op_close(struct libusb_device_handle *dev_handle)
 	/* fd may have already been removed by POLLERR condition in op_handle_events() */
 	if (!hpriv->fd_removed)
 		usbi_remove_pollfd(HANDLE_CTX(dev_handle), hpriv->fd);
-	//FD is opened by application intent! We did not open it => we should not close it.
-#if defined(__ANDROID__)
+
+        //FD is opened by application intent! We did not open it => we should not close it.
+#if !defined(__ANDROID__)
 	close(hpriv->fd);
 #endif
 }
@@ -2749,17 +2753,19 @@ static int op_handle_events(struct libusb_context *ctx,
 
 			/* device will still be marked as attached if hotplug monitor thread
 			 * hasn't processed remove event yet */
+
+                        //TODO: maybe don't need now
+#if defined(__ANDROID__)
 			usbi_mutex_static_lock(&linux_hotplug_lock);
 
-#if defined(__ANDROID__)
+
 			if (handle->dev->attached)
 				linux_device_disconnected(handle->dev->bus_number,
 						handle->dev->device_address);
-#endif
 
 
 			usbi_mutex_static_unlock(&linux_hotplug_lock);
-
+#endif
 			if (hpriv->caps & USBFS_CAP_REAP_AFTER_DISCONNECT) {
 				do {
 					r = reap_for_handle(handle);
@@ -2806,16 +2812,17 @@ static clockid_t op_get_timerfd_clockid(void)
 #endif
 
 #if defined(__ANDROID__)
-static int op_get_device_list(struct libusb_context *ctx, struct discovered_devs **discdevs) {
-	int r = 0;
-	selinux_discdevs = discdevs;
-	if (sysfs_can_relate_devices != 0) {
-		r = sysfs_get_device_list(ctx);
-	} else {
-		r = usbfs_get_device_list(ctx);
-	}
-	selinux_discdevs = 0;
-	return r;
+static int op_get_device_list(struct libusb_context *ctx, struct discovered_devs **_discdevs){
+    int r = 0;
+    selinux_discdevs = _discdevs;
+    if (sysfs_can_relate_devices != 0){
+        r = sysfs_get_device_list(ctx);
+    }
+    else {
+        r = usbfs_get_device_list(ctx);
+    }
+    selinux_discdevs = 0;
+    return r;
 }
 #endif
 
@@ -2824,15 +2831,13 @@ const struct usbi_os_backend linux_usbfs_backend = {
 	.caps = USBI_CAP_HAS_HID_ACCESS|USBI_CAP_SUPPORTS_DETACH_KERNEL_DRIVER,
 	.init = op_init,
 	.exit = op_exit,
-
 #if defined(__ANDROID__)
-	.get_device_list = op_get_device_list,//NULL,//Nettle patch
-	.hotplug_poll = NULL,//Nettle patch
+        .get_device_list = op_get_device_list,//NULL,//Nettle patch
+        .hotplug_poll = NULL,//Nettle patch
 #else
-	.get_device_list = NULL,
-	.hotplug_poll = op_hotplug_poll,
+        .get_device_list = NULL,
+        .hotplug_poll = op_hotplug_poll,
 #endif
-
 	.get_device_descriptor = op_get_device_descriptor,
 	.get_active_config_descriptor = op_get_active_config_descriptor,
 	.get_config_descriptor = op_get_config_descriptor,
