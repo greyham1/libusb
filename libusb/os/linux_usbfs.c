@@ -1409,6 +1409,7 @@ static int op_open(struct libusb_device_handle *handle)
 		if (hpriv->fd == LIBUSB_ERROR_NO_DEVICE) {
 			/* device will still be marked as attached if hotplug monitor thread
 			 * hasn't processed remove event yet */
+#if !defined(__ANDROID__)
 			usbi_mutex_static_lock(&linux_hotplug_lock);
 			if (handle->dev->attached) {
 				usbi_dbg("open failed with no device, but device still attached");
@@ -1416,6 +1417,7 @@ static int op_open(struct libusb_device_handle *handle)
 						handle->dev->device_address);
 			}
 			usbi_mutex_static_unlock(&linux_hotplug_lock);
+#endif
 		}
 		return hpriv->fd;
 	}
@@ -2757,7 +2759,7 @@ static int op_handle_events(struct libusb_context *ctx,
 			 * hasn't processed remove event yet */
 
                         //TODO: maybe don't need now
-#if defined(__ANDROID__)
+#if !defined(__ANDROID__)
 			usbi_mutex_static_lock(&linux_hotplug_lock);
 
 
