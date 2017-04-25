@@ -471,6 +471,7 @@ static int op_init(struct libusb_context *ctx)
 	if (sysfs_has_descriptors)
 		usbi_dbg("sysfs has complete descriptors");
 
+#if !defined(__ANDROID__)
 	usbi_mutex_static_lock(&linux_hotplug_startstop_lock);
 	r = LIBUSB_SUCCESS;
 	if (init_count == 0) {
@@ -486,7 +487,7 @@ static int op_init(struct libusb_context *ctx)
 	} else
 		usbi_err(ctx, "error starting hotplug event monitor");
 	usbi_mutex_static_unlock(&linux_hotplug_startstop_lock);
-
+#endif
 	return r;
 }
 
@@ -532,11 +533,12 @@ static int linux_scan_devices(struct libusb_context *ctx)
 	int ret;
 
 	usbi_mutex_static_lock(&linux_hotplug_lock);
-
-#if defined(USE_UDEV)
-	ret = linux_udev_scan_devices(ctx);
-#else
-	ret = linux_default_scan_devices(ctx);
+#if !defined(__ANDROID__)
+	#if defined(USE_UDEV)
+		ret = linux_udev_scan_devices(ctx);
+	#else
+		ret = linux_default_scan_devices(ctx);
+	#endif
 #endif
 
 	usbi_mutex_static_unlock(&linux_hotplug_lock);
