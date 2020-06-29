@@ -1,4 +1,5 @@
 MAY NEED THIS TO ACCESS I2C TYPE DATA FROM USB WHEN I2C ISNT AVALIABLE. SOME USB HUBS CAN BE USED AS ADC
+Stolen from guy probably using this code to hack into quest to get it to recognise external full body tracking data
 
 # libusb
 
