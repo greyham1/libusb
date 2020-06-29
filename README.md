@@ -1,3 +1,5 @@
+MAY NEED THIS TO ACCESS I2C TYPE DATA FROM USB WHEN I2C ISNT AVALIABLE. SOME USB HUBS CAN BE USED AS ADC
+
 # libusb
 
 [![Build Status](https://travis-ci.org/libusb/libusb.svg?branch=master)](https://travis-ci.org/libusb/libusb)
